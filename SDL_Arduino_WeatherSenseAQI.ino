@@ -7,6 +7,9 @@
 #include <JeeLib.h>
 #include "MemoryFree.h"
 
+// unique ID of this WeatherSenseAQI system - change if you have multiple WeatherSenseAQI systems
+#define WEATHERSENSEAQIID 1
+
 // WeatherSenseProtocol of 8 is SolarMAX LiPo   BatV < 7V
 // WeatherSenseProtocol of 10 is SolarMAX LeadAcid   BatV > 7V LoRa version
 // WeatherSenseProtocol of 11 is SolarMAX4 LeadAcid BatV > 7V
@@ -39,13 +42,15 @@
 #undef RANGETESTMODE
 
 
-#ifdef RANGETESTMODE
+//#ifdef RANGETESTMODE
 // 15 second response
-#define SLEEPCYCLE 30000  // can't be less than 30000 without modification of sleep code
-#else
+//#define SLEEPCYCLE 30000  // can't be less than 30000 without modification of sleep code
+//#else
 // 15 minute response
-#define SLEEPCYCLE (long)1000 * 60 * 15
-#endif
+//#define SLEEPCYCLE (long)1000 * 60 * 15
+//#endif
+
+#define SLEEPCYCLE 30000
 
 
 #include "Crc16.h"
@@ -54,7 +59,7 @@ Crc16 crc;
 
 
 // AQI
-#include "Seeed_HM330X.h"
+#include <Seeed_HM330X.h>
 HM330X hm330x;
 
 
@@ -96,6 +101,8 @@ HM330XErrorCode parse_result(uint8_t* data)
   for (int i = 2; i < 8; i++) {
     value = (uint16_t)data[i * 2] << 8 | data[i * 2 + 1];
     pValue[i - 2] = value;
+    Serial.print("value =");
+    Serial.println(value);
   }
 
   return NO_ERROR;
@@ -114,7 +121,6 @@ HM330XErrorCode parse_result_value(uint8_t* data)
     //Serial.println("wrong checkSum!!!!");
     return ERROR_PARAM;
   }
-  Serial.println("");
   return NO_ERROR;
 }
 
@@ -126,20 +132,14 @@ ISR(WDT_vect) {
 #include <avr/sleep.h>
 #include <avr/power.h>
 
-#include "SDL_Arduino_INA3221.h"
-SDL_Arduino_INA3221 INA3221;
-
 // the three channels of the INA3221 named for INA3221 Solar Power Controller channels (www.switchdoc.com)
 #define LIPO_BATTERY_CHANNEL 1
 #define SOLAR_CELL_CHANNEL 2
 #define OUTPUT_CHANNEL 3
 
-
 RH_ASK driver(2000, RXPIN, TXPIN);
 
 unsigned long MessageCount = 0;
-
-
 
 #include "avr/pgmspace.h"
 #include <Time.h>
@@ -159,8 +159,6 @@ typedef enum {
 
 
 // Device Present State Variables
-
-bool INA3221_Present;
 bool HM3301_Present;
 
 byte byteBuffer[200];  // contains string to be sent to RX unit
@@ -171,13 +169,6 @@ long TimeStamp;
 
 
 // State Status (sans HM3301)
-
-float BatteryVoltage;
-float BatteryCurrent;
-float LoadVoltage;
-float LoadCurrent;
-float SolarPanelVoltage;
-float SolarPanelCurrent;
 byte AuxA;
 
 // AuxA has state information
@@ -295,12 +286,12 @@ int buildProtocolMessage()
   bufferCount = convert2ByteVariables(bufferCount, pValue[5]);
   bufferCount = convert2ByteVariables(bufferCount, EPAAQI);
 
-  bufferCount = convert4ByteFloatVariables(bufferCount, LoadVoltage);  // Solar Data
-  bufferCount = convert4ByteFloatVariables(bufferCount, BatteryVoltage);
-  bufferCount = convert4ByteFloatVariables(bufferCount, BatteryCurrent);
-  bufferCount = convert4ByteFloatVariables(bufferCount, LoadCurrent);
-  bufferCount = convert4ByteFloatVariables(bufferCount, SolarPanelVoltage);
-  bufferCount = convert4ByteFloatVariables(bufferCount, SolarPanelCurrent);
+  bufferCount = convert4ByteFloatVariables(bufferCount, 0.0); // Load Voltage
+  bufferCount = convert4ByteFloatVariables(bufferCount, 0.0); // Battery Voltage
+  bufferCount = convert4ByteFloatVariables(bufferCount, 0.0); // Battery Current
+  bufferCount = convert4ByteFloatVariables(bufferCount, 0.0); // Load Current
+  bufferCount = convert4ByteFloatVariables(bufferCount, 0.0); // Solar Panel Voltage
+  bufferCount = convert4ByteFloatVariables(bufferCount, 0.0); // Solar Panel Curent
 
   byteBuffer[bufferCount] = AuxA | SOFTWAREVERSION << 4;  // Aux + Software Version
   bufferCount++;
@@ -381,26 +372,6 @@ void ResetWatchdog()
   digitalWrite(WATCHDOG_1, HIGH);
 }
 
-
-// turn on HM3301
-void turn_on_HM3301()
-{
-  // Deal with low voltage issues
-  if ((BatteryVoltage > 2.9) || (INA3221_Present == false)) {
-    Serial.println(F("Turn On HM3301"));
-    pinMode(POWERDOWN, INPUT);
-    digitalWrite(POWERDOWN, HIGH);  // turn HM3301 on
-  }
-}
-
-// turn off HM3301
-void turn_off_HM3301() 
-{
-  Serial.println(F("Turn Off HM3301"));
-  pinMode(POWERDOWN, OUTPUT);
-  digitalWrite(POWERDOWN, LOW);  // turn HM3301 on
-}
-
 void setup() 
 {
 
@@ -446,62 +417,24 @@ void setup()
   if (!driver.init()) 
   {
     Serial.println(F("init failed"));
-    while (1)
-      ;
+    while (1);
   }
 
-  BatteryVoltage = 0.0;
-  BatteryCurrent = 0.0;
-  LoadCurrent = 0.0;
-  SolarPanelVoltage = 0.0;
-  SolarPanelCurrent = 0.0;
+  AuxA = AuxA & 0XFB;
 
-  // test for INA3221_Present
-  INA3221_Present = false;
-
-  int MIDNumber;
-  INA3221.wireReadRegister(0xFE, &MIDNumber);
-
-  if (MIDNumber != 0x5449) 
+  delay(1000);
+  if (hm330x.init()) 
   {
-    INA3221_Present = false;
-    Serial.println(F("INA3221 Not Present"));
+    Serial.println(F("HM330X init failed!!!"));
+    Serial.println(F("HM3301 Not Present"));
+    HM3301_Present = false;
   } 
   else 
   {
-    INA3221_Present = true;
-    BatteryVoltage = INA3221.getBusVoltage_V(LIPO_BATTERY_CHANNEL);
+    HM3301_Present = true;
+    Serial.println(F("HM3301 Present"));
     // State Variable
-    AuxA = AuxA | 0X02;
-  }
-
-  turn_on_HM3301();
-
-  // Deal with low voltage issues
-  if ((BatteryVoltage > 2.9) || (INA3221_Present == false)) 
-  {
-
-    AuxA = AuxA & 0XFB;
-
-    delay(1000);
-    if (hm330x.init()) 
-    {
-      Serial.println("HM330X init failed!!!");
-      Serial.println(F("HM3301 Not Present"));
-      HM3301_Present = false;
-    } 
-    else 
-    {
-      HM3301_Present = true;
-      Serial.println(F("HM3301 Present"));
-      // State Variable
-      AuxA = AuxA | 0X01;
-    }
-  } 
-  else 
-  {
-    // State Variable
-    AuxA = AuxA | 0X04;  // < 2.9V
+    AuxA = AuxA | 0X01;
   }
 
   // initialize HM3301 data arrays
@@ -524,16 +457,15 @@ void setup()
 void readHM3301() 
 {
   // hm33301
-  if (hm330x.read_hm330x_value(buf, 29)) 
+  if (hm330x.read_sensor_value(buf, 29)) 
   {
     Serial.println("HM330X read result failed!!!");
   }
 
   HM330XErrorCode hm3301error;
   hm3301error = parse_result_value(buf);
-
   parse_result(buf);
-  Serial.println("");
+
   if (hm3301error == NO_ERROR) 
   {
     // pValue set in parse_result_value
@@ -562,7 +494,6 @@ void readHM3301()
 
 void loop() 
 {
-
   ResetWatchdog();
   // Only send if source is SLEEP_INTERRUPT
 #if defined(TXDEBUG)
@@ -575,74 +506,31 @@ if ((wakeState == SLEEP_INTERRUPT) || (wakeState == REBOOT))
     wakeState = NO_INTERRUPT;
     TimeStamp = millis();
 
-#if defined(TXDEBUG)
-#endif
-    // Deal with low voltage issues
-    if ((BatteryVoltage > 2.9) || (INA3221_Present == false)) 
-    {
-      turn_on_HM3301();
+    ResetWatchdog();
+    delay(10000);  // stablize fan
+    readHM3301();
+    ResetWatchdog();
 
-      delay(1000);
-      if (hm330x.init()) 
+    // check for bad read.  If bad (all zeros) read again
+
+    int i;
+    bool readGood = false;
+    for (i = 0; i++; i < 6) 
+    {
+      if (pValue[i] != 0) 
       {
-        Serial.println("HM330X init failed!!!");
-        Serial.println(F("HM3301 Not Present"));
-        HM3301_Present = false;
-      } 
-      else 
-      {
-        HM3301_Present = true;
-        Serial.println(F("HM3301 Present"));
-        // State Variable
-        AuxA = AuxA | 0X01;
+        readGood = true;
+        break;
       }
-      ResetWatchdog();
-      delay(30000);  // stablize fan
+#if defined(TXDEBUG)
+      Serial.println(F("Bad HM3301 read - retrying"));
+#endif
+    }
+    if (readGood == false)
+    {
       readHM3301();
-      ResetWatchdog();
-
-      // check for bad read.  If bad (all zeros) read again
-
-      int i;
-      bool readGood;
-      readGood = false;
-      for (i = 0; i++; i < 6) 
-      {
-        if (pValue[i] != 0) 
-        {
-          readGood = true;
-          break;
-        }
-#if defined(TXDEBUG)
-        Serial.println(F("Bad HM3301 read - retrying"));
-#endif
-      }
-      if (readGood == false)
-      {
-        readHM3301();
-      }
-      AuxA = AuxA & 0XFB;
-    } 
-    else 
-    {
-      // State Variable
-      AuxA = AuxA | 0X04;  // < 2.9V
     }
-
-    turn_off_HM3301();
-
-    if (INA3221_Present) 
-    {
-      BatteryVoltage = INA3221.getBusVoltage_V(LIPO_BATTERY_CHANNEL);
-      BatteryCurrent = INA3221.getCurrent_mA(LIPO_BATTERY_CHANNEL);
-
-      SolarPanelVoltage = INA3221.getBusVoltage_V(SOLAR_CELL_CHANNEL);
-      SolarPanelCurrent = -INA3221.getCurrent_mA(SOLAR_CELL_CHANNEL);
-
-      // read from INA3211 High Current
-      LoadVoltage = INA3221.getBusVoltage_V(OUTPUT_CHANNEL);
-      LoadCurrent = INA3221.getCurrent_mA(OUTPUT_CHANNEL) * 0.75;
-    }
+    AuxA = AuxA & 0XFB;
 
 
 #if defined(TXDEBUG)
@@ -673,24 +561,6 @@ if ((wakeState == SLEEP_INTERRUPT) || (wakeState == REBOOT))
     Serial.print(F("EPA AQI="));
     Serial.println(EPAAQI);
 
-    Serial.print(F(" Battery Voltage:  "));
-    Serial.print(BatteryVoltage);
-    Serial.println(F(" V"));
-    Serial.print(F(" Battery Current:       "));
-    Serial.print(BatteryCurrent);
-    Serial.println(F(" mA"));
-    Serial.print(F(" Solar Panel Voltage:   "));
-    Serial.print(SolarPanelVoltage);
-    Serial.println(F(" V"));
-    Serial.print(F(" Solar Current:  "));
-    Serial.print(SolarPanelCurrent);
-    Serial.println(F(" mA"));
-    Serial.print(F(" Load Voltage:  "));
-    Serial.print(LoadVoltage);
-    Serial.println(F(" V"));
-    Serial.print(F(" Load Current:       "));
-    Serial.print(LoadCurrent);
-    Serial.println(F(" mA"));
     Serial.print(F(" Currentmillis() = "));
     Serial.println(millis());
     Serial.print(F("  AuxA State:"));
